@@ -36,9 +36,15 @@ logger = logging.getLogger(__name__)
 
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="Souli Data Ingestion API",
-    description="Pipeline to extract coaching EnergyNodes from YouTube videos and store them in Qdrant.",
-    version="1.0.0",
+    title="Souli AI — Data Ingestion & Retrieval API",
+    description=(
+        "Souli AI Mobile Application — an AI-powered emotional wellness companion "
+        "that supports users through daily emotional challenges using safe emotional "
+        "expression, personalized insights, and short guided practices. "
+        "This pipeline extracts structured EnergyNodes (with DiagnosticLayer routing) "
+        "from YouTube coaching transcripts and stores them in Qdrant."
+    ),
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -155,11 +161,18 @@ async def process_csv(file: UploadFile = File(...)):
     if records:
         export_df = pd.json_normalize(records)
     else:
-        # Create empty DataFrame with expected columns
+        # Create empty DataFrame with expected columns (including diagnostic_layer)
         export_df = pd.DataFrame(columns=[
             "video_id", "video_url", "main_question", "category",
+            # Diagnostic Layer — deciding factor for energy-node routing
+            "diagnostic_layer.related_inner_issues",
+            "diagnostic_layer.reality_commitment_check",
+            "diagnostic_layer.hidden_benefit",
+            "diagnostic_layer.energy_node",
+            # Response pillars — how to talk after knowing the problem
             "pillars.intervention_narrative", "pillars.intervention_action", "pillars.intervention_shift",
-            "atmosphere.tone", "atmosphere.pacing", "overflow"
+            "atmosphere.tone", "atmosphere.pacing",
+            "overflow",
         ])
 
     # Save to data/ directory

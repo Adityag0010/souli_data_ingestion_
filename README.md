@@ -1,8 +1,8 @@
-# Souli Data Ingestion & Retrieval System
+# Souli AI — Data Ingestion & Retrieval System
 
-A high-performance AI data pipeline for **Souli** — an emotional wellbeing platform.
+**Souli AI Mobile Application** — an AI-powered emotional wellness companion that supports users through daily emotional challenges using safe emotional expression, personalized insights, and short guided practices.
 
-The system extracts **3–6 structured coaching insights (EnergyNodes)** per YouTube video using **Llama 3**, stores them in **Qdrant**, and exposes a FastAPI backend + Streamlit admin dashboard.
+This pipeline extracts **3–6 structured coaching insights (EnergyNodes)** per YouTube video, stores them in **Qdrant**, and exposes a FastAPI backend for the Souli RAG system.
 
 ---
 
@@ -11,11 +11,11 @@ The system extracts **3–6 structured coaching insights (EnergyNodes)** per You
 ```
 souli-data-ingestion/
 ├── app/
-│   ├── main.py               # FastAPI routes
+│   ├── main.py               # FastAPI routes (v2.0.0)
 │   ├── models/
-│   │   └── metadata.py       # Pydantic: EnergyNode / Pillars / Atmosphere
+│   │   └── metadata.py       # Pydantic: EnergyNode / DiagnosticLayer / Pillars / Atmosphere
 │   └── services/
-│       ├── extractor.py      # YouTube → Llama 3 → EnergyNodes
+│       ├── extractor.py      # YouTube → LLM → EnergyNodes
 │       ├── qdrant_db.py      # Qdrant upsert & similarity search
 │       └── text_utils.py     # Transcript fetch & clean
 ├── ui/
@@ -23,6 +23,7 @@ souli-data-ingestion/
 ├── data/                     # CSV exports (git-ignored)
 ├── tests/
 │   └── test_extractor_smoke.py
+├── Souli_EnergyFramework_PW.xlsx  # Source framework (2 sheets)
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
@@ -39,7 +40,7 @@ souli-data-ingestion/
 |------|---------|---------|
 | Python | 3.10+ | Backend |
 | Docker | Latest | Qdrant |
-| Ollama | Latest | Local Llama 3 |
+| Groq API Key | — | Cloud Llama 3 (recommended) |
 
 ### 2 — Clone & Install
 
@@ -65,14 +66,15 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-# Use "ollama" for local or "groq" for cloud Llama 3
-LLM_TYPE=ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3
+# Use "groq" for cloud Llama 3 (recommended) or "ollama" for local
+LLM_TYPE=groq
+GROQ_API_KEY=your_key_here
+GROQ_MODEL=llama-3.3-70b-versatile
 
-# Or for Groq cloud:
-# LLM_TYPE=groq
-# GROQ_API_KEY=your_key_here
+# Or for local Ollama:
+# LLM_TYPE=ollama
+# OLLAMA_BASE_URL=http://localhost:11434
+# OLLAMA_MODEL=llama3
 
 QDRANT_HOST=localhost
 QDRANT_PORT=6333
@@ -82,30 +84,23 @@ QDRANT_COLLECTION=souli_knowledge_base
 ### 4 — Start Qdrant (Docker)
 
 ```bash
+# Linux / macOS
 docker run -d --name qdrant -p 6333:6333 -p 6334:6334 \
   -v $(pwd)/qdrant_storage:/qdrant/storage \
   qdrant/qdrant
 ```
 ```powershell
+# Windows PowerShell
 docker run -d --name qdrant -p 6333:6333 -p 6334:6334 -v "${PWD}/qdrant_storage:/qdrant/storage" qdrant/qdrant
 ```
 
-
-
-### 5 — Start Ollama + Pull Llama 3
-
-```bash
-ollama serve         # starts the Ollama server
-ollama pull llama3   # downloads the model (~4GB)
-```
-
-### 6 — Start FastAPI
+### 5 — Start FastAPI
 
 ```bash
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-### 7 — Start Streamlit UI
+### 6 — Start Streamlit UI
 
 ```bash
 streamlit run ui/app.py
@@ -144,14 +139,19 @@ https://www.youtube.com/watch?v=VIDEO_ID_2
 ```bash
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
-  -d '{"query": "I feel exhausted and nothing is ever enough", "k": 3}'
+  -d '{"query": "I feel emotionally exhausted and nothing is ever enough", "k": 3}'
 ```
 
 ---
 
-## 🧠 Tiered Metadata Architecture
+## 🧠 EnergyNode Schema (v2.0)
 
-Each coaching video produces **3–6 EnergyNodes**, one per distinct coaching use-case:
+Each coaching video produces **3–6 EnergyNodes**. The schema has two logical tiers:
+
+| Tier | Field | Purpose |
+|------|-------|---------|
+| **Routing** | `diagnostic_layer` | Decides *which* energy node the user is in |
+| **Response** | `pillars`, `atmosphere`, `overflow` | Decides *how* to talk after routing |
 
 ```json
 {
@@ -159,9 +159,17 @@ Each coaching video produces **3–6 EnergyNodes**, one per distinct coaching us
   "video_url": "https://youtube.com/watch?v=abc123",
   "main_question": "How do I stop feeling overwhelmed?",
   "category": "Anxiety",
+
+  "diagnostic_layer": {
+    "related_inner_issues": "chronic stress, body-mind disconnection, hypervigilant nervous system, suppressed fear",
+    "reality_commitment_check": "Are you willing to slow down and listen to what your body is telling you?",
+    "hidden_benefit": "staying in overdrive keeps a sense of productivity and avoids sitting with uncomfortable feelings",
+    "energy_node": "hypervigilant_energy"
+  },
+
   "pillars": {
-    "intervention_narrative": "Anxiety is like a smoke alarm ...",
-    "intervention_action": "3-minute morning body scan practice.",
+    "intervention_narrative": "Anxiety is like a smoke alarm — it signals 'check the kitchen', not 'the house is on fire'.",
+    "intervention_action": "3-minute morning body scan — notice sensations without trying to fix them.",
     "intervention_shift": "Move from 'what is wrong with me' to 'what is my body trying to tell me.'"
   },
   "atmosphere": {
@@ -172,26 +180,46 @@ Each coaching video produces **3–6 EnergyNodes**, one per distinct coaching us
 }
 ```
 
-**Vectorized:** `main_question + category`  
-**Stored in Qdrant payload:** Full JSON above (sparse-safe — no null noise)
+### Embedding Strategy
+
+**Vectorized:** `main_question + category + related_inner_issues + reality_commitment_check + hidden_benefit + energy_node`
+
+The full `diagnostic_layer` is included in the embedding so that semantic search lands on the correct energy block — not just the surface question. This is the **deciding factor** for RAG retrieval.
+
+**Stored in Qdrant payload:** Full JSON above.
 
 ---
 
-## 🧪 Smoke Test
+## 🔬 DiagnosticLayer Fields (from Souli_EnergyFramework_PW.xlsx)
+
+| Field | Source Column | Description |
+|-------|--------------|-------------|
+| `related_inner_issues` | `Related Inner Issues` | Root psychological dynamics driving the struggle |
+| `reality_commitment_check` | `Reality Commitment Check` | Yes/no question testing user readiness to change |
+| `hidden_benefit` | `Hidden Psychological / Emotional Benefit` | Unconscious secondary gain from staying stuck |
+| `energy_node` | `energy_node/energy block behind it` | Canonical snake_case energy-block label |
+
+Known `energy_node` values: `blocked_energy`, `outofcontrol_energy`, `scattered_energy`, `depleted_energy`, `collapsed_energy`, `hypervigilant_energy`, `disconnected_energy`, `wounded_energy`.
+
+---
+
+## 🧪 Smoke Tests
 
 ```bash
-# Requires Ollama running with llama3 pulled (or GROQ_API_KEY set)
-python -m pytest tests/test_extractor_smoke.py -v
+# Requires GROQ_API_KEY or Ollama running with llama3
+.\venv\Scripts\python.exe -m pytest tests/ -v
 ```
+
+Tests cover: list return, minimum node count, EnergyNode type validation, all core field non-empty checks, **diagnostic_layer field checks**, embed_text content checks, and video metadata preservation.
 
 ---
 
-## 🌊 Using Groq Instead of Ollama
+## 🌊 Using Groq (Recommended)
 
 ```env
 LLM_TYPE=groq
 GROQ_API_KEY=gsk_your_key_here
-GROQ_MODEL=llama3-8b-8192
+GROQ_MODEL=llama-3.3-70b-versatile
 ```
 
 Get a free key at [console.groq.com](https://console.groq.com).

@@ -19,6 +19,7 @@ env/
 data/*.csv
 data/*.xlsx
 data/*.json
+Souli_Data_Ingestion.ipynb
 
 # Qdrant local storage
 qdrant_storage/

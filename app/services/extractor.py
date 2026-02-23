@@ -1,60 +1,74 @@
 """
-extractor.py — YouTube transcript processing + Llama 3 multi-row extraction.
+extractor.py — YouTube transcript processing + LLM multi-row extraction.
 
 Key design goals:
   1. One video → 3-6 EnergyNode rows (distinct coaching use-cases).
-  2. Strict few-shot JSON-array prompt to keep Llama 3 on track.
+  2. Strict few-shot JSON-array prompt with the full expanded schema.
   3. Regex-based JSON extraction handles prose wrapped around the array.
   4. Tenacity retry (3 attempts) for transient LLM failures.
   5. Pydantic validation rejects malformed rows gracefully.
+
+Schema now includes DiagnosticLayer (4 mandatory fields) as the
+deciding factor for energy-node routing, alongside the existing
+Pillars, Atmosphere, and Overflow response fields.
 """
 
 import json
 import logging
 import os
 import re
-import sys
 from typing import List
 
 from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-from app.models.metadata import EnergyNode, Pillars, Atmosphere
+from app.models.metadata import EnergyNode, Pillars, Atmosphere, DiagnosticLayer
 from app.services.text_utils import fetch_transcript, clean_transcript, truncate_transcript
 
 load_dotenv(override=True)
 
 logger = logging.getLogger(__name__)
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-# (Environment variables are now looked up dynamically in get_llm)
 
-# ── Few-Shot Prompt ───────────────────────────────────────────────────────────
+# ── System Prompt ─────────────────────────────────────────────────────────────
 SYSTEM_PROMPT = """\
-You are an expert coaching analyst for Souli, an emotional wellbeing platform.
-Your job is to read a coaching transcript and extract 3 to 6 distinct use-cases or
-problem statements that the coach addresses. For each use-case, you output a single
-JSON object. Return ONLY a valid JSON array — no explanatory text, no markdown fences.
+You are an expert coaching analyst for Souli — an AI-powered emotional wellness
+companion that supports users through daily emotional challenges using safe
+emotional expression, personalized insights, and short guided practices.
 
-Each object in the array MUST follow this exact schema:
+Your job is to read a coaching transcript and extract 3 to 6 distinct use-cases
+or problem statements that the coach addresses. For each use-case, output one
+JSON object. Return ONLY a valid JSON array — no explanatory text, no markdown.
+
+Each object MUST follow this exact schema:
 {
-  "main_question": "<The core user struggle addressed — one clear sentence>",
-  "category": "<Emotional category, e.g. Anxiety, Burnout, Grief, Self-Worth, Relationships, Purpose>",
+  "main_question": "<The core user struggle — one clear sentence in 1st/2nd person>",
+  "category": "<Emotional category: Anxiety | Burnout | Grief | Self-Worth | Relationships | Purpose | Anger | Emotional Health | Relationship Awareness | Trauma | Identity | Loneliness | Fear | Shame | other>",
+
+  "diagnostic_layer": {
+    "related_inner_issues": "<Root psychological/emotional dynamics driving the surface question — comma-separated phrases, e.g. 'emotional labour, over-caring, burnout, suppressed needs'>",
+    "reality_commitment_check": "<A single yes/no question that tests user readiness to change, 2nd-person present tense — e.g. 'Do you want to feel restful?'>",
+    "hidden_benefit": "<The unconscious secondary gain the user gets from staying stuck — e.g. 'avoiding painful decisions' or 'maintaining a sense of control'>",
+    "energy_node": "<Canonical snake_case energy-block label — e.g. blocked_energy | outofcontrol_energy | scattered_energy | depleted_energy | collapsed_energy | hypervigilant_energy | disconnected_energy | wounded_energy>"
+  },
+
   "pillars": {
     "intervention_narrative": "<A short story or metaphor the coach uses to reframe this problem>",
-    "intervention_action": "<A concrete exercise or practice the coach recommends for this problem>",
-    "intervention_shift": "<One-liner mindset shift the coach is offering>"
+    "intervention_action": "<A concrete, time-bounded mindfulness exercise or practice>",
+    "intervention_shift": "<One-liner mindset shift — often structured as 'from X to Y'>"
   },
+
   "atmosphere": {
-    "tone": "<Tone of the coach for this segment, e.g. 'warm and grounded'>",
-    "pacing": "<Pace of delivery, e.g. 'slow and reflective'>"
+    "tone": "<2-3 adjectives describing the coach's emotional tone — e.g. 'warm and reassuring'>",
+    "pacing": "<Pace of delivery — e.g. 'slow and deliberate'>"
   },
-  "overflow": ["<unique phrase or gem 1>", "<unique phrase or gem 2>"]
+
+  "overflow": ["<unique phrase or coaching gem 1>", "<unique phrase or gem 2>"]
 }
 
-────── FEW-SHOT EXAMPLES ──────
+────── FEW-SHOT EXAMPLE ──────
 
-INPUT (excerpt from a coaching transcript):
+INPUT (coaching transcript excerpt):
 "When you feel overwhelmed, your nervous system is not broken — it is working exactly
 as designed. The body is saying: slow down, something here needs your attention.
 I like to think of anxiety as a smoke alarm. It doesn't mean the house is on fire.
@@ -66,8 +80,14 @@ between you and your body. The shift is moving from 'what is wrong with me' to
 OUTPUT:
 [
   {
-    "main_question": "How do I stop feeling overwhelmed when my nervous system is in overdrive?",
+    "main_question": "How do I stop feeling overwhelmed when my nervous system feels out of control?",
     "category": "Anxiety",
+    "diagnostic_layer": {
+      "related_inner_issues": "chronic stress, body-mind disconnection, hypervigilant nervous system, suppressed fear",
+      "reality_commitment_check": "Are you willing to slow down and listen to what your body is telling you?",
+      "hidden_benefit": "staying in overdrive keeps a sense of productivity and avoids sitting with uncomfortable feelings",
+      "energy_node": "hypervigilant_energy"
+    },
     "pillars": {
       "intervention_narrative": "Anxiety is like a smoke alarm — it signals 'check the kitchen', not 'the house is on fire'.",
       "intervention_action": "Practice a 3-minute morning body scan — notice sensations without trying to fix them.",
@@ -84,9 +104,10 @@ OUTPUT:
   }
 ]
 
-────── END OF EXAMPLES ──────
+────── END OF EXAMPLE ──────
 
 Now analyze the following transcript and produce 3 to 6 objects using the same schema.
+Pay special attention to the diagnostic_layer — it is the DECIDING FACTOR for energy-node routing.
 Return ONLY the JSON array. Do not include any text outside the array.
 """
 
@@ -102,9 +123,9 @@ Return the JSON array now:
 def get_llm():
     """Return the configured LangChain chat model."""
     load_dotenv(override=True)
-    logger.info("DEBUG: Extractor logic version 2.0")
+    logger.info("DEBUG: Extractor logic version 3.0 (DiagnosticLayer schema)")
     logger.info("DEBUG: os.environ['GROQ_MODEL'] = %s", os.environ.get("GROQ_MODEL"))
-    
+
     llm_type = os.getenv("LLM_TYPE", "ollama").lower()
     groq_api_key = os.getenv("GROQ_API_KEY", "")
     groq_model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -174,11 +195,11 @@ def _call_llm_and_parse(transcript: str) -> list[dict]:
 
     llm_type = os.getenv("LLM_TYPE", "ollama").lower()
     model_name = os.getenv("GROQ_MODEL" if llm_type == "groq" else "OLLAMA_MODEL", "unknown")
-    
+
     logger.info("Calling LLM (%s/%s) ...", llm_type, model_name)
     response = llm.invoke(messages)
     raw = response.content if hasattr(response, "content") else str(response)
-    logger.debug("Raw LLM response (first 500 chars): %s", raw[:500])
+    logger.debug("Raw LLM response (first 800 chars): %s", raw[:800])
 
     return _extract_json_array(raw)
 
@@ -191,11 +212,22 @@ def _validate_nodes(raw_list: list, video_id: str, video_url: str) -> list[Energ
     nodes: list[EnergyNode] = []
     for i, item in enumerate(raw_list):
         try:
+            # ── Build DiagnosticLayer ─────────────────────────────────────────
+            dl_raw = item.get("diagnostic_layer", {})
+            diagnostic_layer = DiagnosticLayer(
+                related_inner_issues=dl_raw.get("related_inner_issues", ""),
+                reality_commitment_check=dl_raw.get("reality_commitment_check", ""),
+                hidden_benefit=dl_raw.get("hidden_benefit", ""),
+                energy_node=dl_raw.get("energy_node", ""),
+            )
+
+            # ── Build full EnergyNode ─────────────────────────────────────────
             node = EnergyNode(
                 video_id=video_id,
                 video_url=video_url,
                 main_question=item["main_question"],
                 category=item["category"],
+                diagnostic_layer=diagnostic_layer,
                 pillars=Pillars(**item["pillars"]),
                 atmosphere=Atmosphere(**item["atmosphere"]),
                 overflow=item.get("overflow", []),
@@ -226,7 +258,11 @@ def extract_energy_nodes(
         List of validated EnergyNode objects (may be empty on total failure).
     """
     truncated = truncate_transcript(transcript, max_chars=max_chars)
-    logger.info("Transcript length: %d chars (original), %d chars (truncated)", len(transcript), len(truncated))
+    logger.info(
+        "Transcript length: %d chars (original), %d chars (truncated)",
+        len(transcript),
+        len(truncated),
+    )
 
     try:
         raw_list = _call_llm_and_parse(truncated)
