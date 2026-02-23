@@ -1,0 +1,3 @@
+# data/
+# This directory stores exported CSV files from the ingestion pipeline.
+# Files here are git-ignored via .gitignore rules.

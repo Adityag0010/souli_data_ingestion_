@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Secrets
+.env
+
+# Data & exports
+data/*.csv
+data/*.xlsx
+data/*.json
+
+# Qdrant local storage
+qdrant_storage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test cache
+.pytest_cache/
+*.egg-info/
+dist/
+build/
